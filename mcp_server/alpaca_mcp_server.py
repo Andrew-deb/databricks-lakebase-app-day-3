@@ -82,7 +82,7 @@ def _get_end_user_email() -> str:
     # Fallback: use service principal (local development or non-App contexts)
     from databricks.sdk import WorkspaceClient
     w = WorkspaceClient()
-    return w.current_user.me().user_name or 'zach@dataexpert.io'
+    return w.current_user.me().user_name or 'omakuandy@gmail.com'
 
 
 mcp = FastMCP("alpaca-paper-trading")
@@ -304,7 +304,7 @@ def add_to_watchlist(symbol: str) -> dict:
 
 
 @mcp.tool
-def get_watchlist(limit: int = 100, email: str = 'zach@dataexpert.io') -> dict:
+def get_watchlist(limit: int = 100, email: str = 'omakuandy@gmail.com') -> dict:
     """
     Retrieve all stocks in the authenticated user's watchlist from Lakebase.
     
