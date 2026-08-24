@@ -41,11 +41,13 @@ import secrets
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
 import asyncio
 from contextvars import ContextVar
+from datetime import datetime, timezone
+import json
 
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 from sentence_transformers import SentenceTransformer
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -81,6 +83,8 @@ _request_context: ContextVar[dict] = ContextVar('request_context', default={})
 _STAGED_TRADE_TTL_SECONDS = 10 * 60
 _staged_trades: dict[str, dict] = {}
 _staged_trades_lock = threading.Lock()
+_session_results: dict[str, list[dict]] = {}
+_session_results_lock = threading.Lock()
 
 
 def _get_end_user_email() -> str:
@@ -101,14 +105,8 @@ mcp = FastMCP("alpaca-paper-trading")
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
-    """Capture end-user identity and persist one trace row per MCP request."""
+    """Capture end-user identity for tools that need request headers."""
     async def dispatch(self, request: Request, call_next):
-        started_at = datetime.now(timezone.utc)
-        started = time.perf_counter()
-        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
-        # Streamable HTTP clients send mcp-session-id after initialization.
-        # The custom header allows clients without MCP session support to carry
-        # the generated ID on subsequent requests.
         session_id = (
             request.headers.get("mcp-session-id")
             or request.headers.get("x-agent-session-id")
@@ -120,50 +118,106 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             'x-agent-session-id': session_id,
         }
         _request_context.set(headers)
-        response = None
+        response = await call_next(request)
+        response.headers.setdefault("x-agent-session-id", session_id)
+        return response
+
+
+def _json_default(value):
+    """Convert SDK/Pydantic values into JSON-safe values for JSONB storage."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _result_payload(result) -> dict:
+    """Convert a FastMCP result into a JSON-safe payload."""
+    return {
+        "is_error": getattr(result, "is_error", False),
+        "structured_content": getattr(result, "structured_content", None),
+        "content": getattr(result, "content", None),
+    }
+
+
+def _session_result_json(session_id: str, tool_name: str, result, error_message: str | None) -> str:
+    """Append this outcome and return the bounded session result aggregate."""
+    outcome = {
+        "tool_name": tool_name,
+        "result": _result_payload(result) if result is not None else None,
+        "error": error_message,
+        "completed_at": datetime.now(timezone.utc),
+    }
+    with _session_results_lock:
+        outcomes = _session_results.setdefault(session_id, [])
+        outcomes.append(outcome)
+        del outcomes[:-100]
+        return json.dumps({"session_id": session_id, "tool_calls": outcomes}, default=_json_default)
+
+
+def _trace_user_email() -> str | None:
+    headers = _request_context.get()
+    if headers.get("x-forwarded-user") or headers.get("x-forwarded-email"):
+        return headers.get("x-forwarded-user") or headers.get("x-forwarded-email")
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+        headers = get_http_headers() or {}
+        return headers.get("x-forwarded-user") or headers.get("x-forwarded-email")
+    except Exception:
+        return None
+
+
+class TraceMiddleware(Middleware):
+    """Persist tool names and the accumulated result for each MCP session."""
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        started_at = datetime.now(timezone.utc)
+        started = time.perf_counter()
+        fastmcp_context = context.fastmcp_context
+        session_id = (
+            getattr(fastmcp_context, "session_id", None)
+            or _request_context.get().get("x-agent-session-id")
+            or str(uuid.uuid4())
+        )
+        request_id = getattr(fastmcp_context, "request_id", None) or str(uuid.uuid4())
+        tool_name = context.message.name
         error_message = None
+        result = None
         try:
-            response = await call_next(request)
+            result = await call_next(context)
+            return result
         except Exception as error:
             error_message = str(error)
             raise
         finally:
-            duration_ms = round((time.perf_counter() - started) * 1000, 2)
-            status_code = response.status_code if response is not None else 500
-            response_headers = response.headers if response is not None else None
-            if response_headers is not None:
-                session_id = response_headers.get("mcp-session-id", session_id)
-                response_headers.setdefault("x-agent-session-id", session_id)
-                response_headers.setdefault("x-trace-id", request_id)
-            await asyncio.to_thread(
-                _write_trace,
-                {
-                    "request_id": request_id,
-                    "session_id": session_id,
-                    "started_at": started_at,
-                    "finished_at": datetime.now(timezone.utc),
-                    "duration_ms": duration_ms,
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status_code": status_code,
-                    "user_email": headers["x-forwarded-user"] or headers["x-forwarded-email"],
-                    "mcp_session_id": request.headers.get("mcp-session-id"),
-                    "error_message": error_message,
-                },
-            )
-        return response
+            session_result = _session_result_json(session_id, tool_name, result, error_message)
+            await asyncio.to_thread(_write_trace, {
+                "request_id": str(request_id),
+                "session_id": str(session_id),
+                "started_at": started_at,
+                "finished_at": datetime.now(timezone.utc),
+                "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                "method": context.method,
+                "path": "/mcp",
+                "status_code": 500 if error_message or getattr(result, "is_error", False) else 200,
+                "mcp_session_id": str(session_id),
+                "tool_name": tool_name,
+                "session_result": session_result,
+                "user_email": _trace_user_email(),
+                "error_message": error_message,
+            })
 
 
 def _write_trace(trace: dict) -> None:
-    """Persist tracing telemetry without allowing Lakebase failures to affect MCP."""
+    """Persist telemetry without allowing Lakebase failures to affect MCP."""
     try:
         lakebase.run_write(
             f"""
             INSERT INTO {TRACE_TABLE_NAME} (
                 request_id, session_id, started_at, finished_at, duration_ms,
                 method, path, status_code, user_email, mcp_session_id,
-                error_message
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                tool_name, session_result, error_message
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
             """,
             (
                 trace["request_id"],
@@ -176,11 +230,16 @@ def _write_trace(trace: dict) -> None:
                 trace["status_code"],
                 trace["user_email"],
                 trace["mcp_session_id"],
+                trace["tool_name"],
+                trace["session_result"],
                 trace["error_message"],
             ),
         )
     except Exception:
         logger.exception("Failed to persist MCP trace")
+
+
+mcp.add_middleware(TraceMiddleware())
 
 
 @mcp.tool

@@ -39,8 +39,9 @@ Agent Bricks agent  --(MCP tool calls)-->  mcp_server/alpaca_mcp_server.py  --(R
   `@mcp.tool` decorators and serves them over streamable HTTP - the transport Databricks'
   MCP client/gateway expects when you [host your own MCP server as a Databricks App](https://docs.databricks.com/aws/en/agents/mcp-tools/custom-mcp).
 - `mcp_server/schema_tracing.sql` creates the `agent_mcp_traces` Lakebase table. The MCP
-  middleware records request IDs, MCP session IDs, user identity, timing, status, and errors
-  for each Agent Bricks call without storing tool arguments or results.
+  middleware records request IDs, MCP session IDs, user identity, timing, status, tool names,
+  and a bounded `session_result` aggregate containing tool outcomes and errors. Tool arguments
+  are not stored.
 - Alpaca's paper trading is **one account per API key pair**, not multi-tenant - `account_id` is
   accepted by every tool for signature compatibility but doesn't select between accounts; every
   call operates against the single Alpaca paper account configured via secrets (see below).

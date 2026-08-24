@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS agent_mcp_traces (
     status_code INTEGER NOT NULL,
     user_email VARCHAR(255),
     mcp_session_id VARCHAR(255),
+    tool_name VARCHAR(255),
+    session_result JSONB,
     error_message TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -23,3 +25,8 @@ CREATE INDEX IF NOT EXISTS idx_agent_mcp_traces_session_id ON agent_mcp_traces (
 CREATE INDEX IF NOT EXISTS idx_agent_mcp_traces_started_at ON agent_mcp_traces (started_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_agent_mcp_traces_user_email ON agent_mcp_traces (user_email);
+
+-- Migration for an existing agent_mcp_traces table:
+ALTER TABLE agent_mcp_traces
+ADD COLUMN IF NOT EXISTS tool_name VARCHAR(255),
+ADD COLUMN IF NOT EXISTS session_result JSONB;
