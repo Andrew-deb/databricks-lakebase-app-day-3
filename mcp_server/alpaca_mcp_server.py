@@ -362,7 +362,7 @@ def get_current_user() -> dict:
 
 
 @mcp.tool
-def add_to_watchlist(symbol: str) -> dict:
+def add_to_watchlist(symbol: str, email: str = 'omakuandy@gmail.com') -> dict:
     """
     Add a stock to the watchlist by fetching its current quote from Massive.com
     and storing it in the Lakebase watchlist table.
@@ -377,7 +377,7 @@ def add_to_watchlist(symbol: str) -> dict:
     """
     try:
         # Get the actual end user's email (not the service principal)
-        user_email = _get_end_user_email()
+        user_email = email
         
         # Get quote from Massive.com
         quote = massive_broker.get_quote(symbol)
