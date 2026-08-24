@@ -1,3 +1,4 @@
+-- Active: 1774862487403@@108.181.197.152@16420
 -- Trace table for Agent Bricks MCP HTTP requests.
 -- Run this SQL against Lakebase before deploying the MCP server.
 
