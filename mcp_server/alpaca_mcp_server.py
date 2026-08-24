@@ -141,14 +141,29 @@ def _result_payload(result) -> dict:
     }
 
 
-def _session_result_json(session_id: str, tool_name: str, result, error_message: str | None) -> str:
-    """Append this outcome and return the bounded session result aggregate."""
-    outcome = {
+def _execution_outcome(tool_name: str, result, error_message: str | None) -> dict:
+    """Build the standardized outcome recorded for every tool execution."""
+    result_is_error = bool(getattr(result, "is_error", False))
+    status = "error" if error_message or result_is_error else "success"
+    if error_message:
+        message = f"Tool {tool_name} errored: {error_message}"
+    elif result_is_error:
+        message = f"Tool {tool_name} returned an error result."
+    else:
+        message = f"Tool {tool_name} executed successfully."
+    return {
         "tool_name": tool_name,
+        "status": status,
+        "message": message,
         "result": _result_payload(result) if result is not None else None,
         "error": error_message,
         "completed_at": datetime.now(timezone.utc),
     }
+
+
+def _session_result_json(session_id: str, tool_name: str, result, error_message: str | None) -> str:
+    """Append this outcome and return the bounded session result aggregate."""
+    outcome = _execution_outcome(tool_name, result, error_message)
     with _session_results_lock:
         outcomes = _session_results.setdefault(session_id, [])
         outcomes.append(outcome)
