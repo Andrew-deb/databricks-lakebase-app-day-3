@@ -396,7 +396,20 @@ def execute_trade(
         # Consume before the external call so retries cannot submit twice.
         del _staged_trades[confirmation_code]
 
-    return alpaca_broker.place_order(account_id, symbol, side, quantity)
+    order = alpaca_broker.place_order(account_id, symbol, side, quantity)
+
+    # Refresh the user's watchlist only after Alpaca accepts the transaction.
+    try:
+        watchlist_update = add_to_watchlist(symbol, _get_end_user_email())
+    except Exception as error:
+        logger.exception("Trade succeeded but watchlist update failed for %s", symbol)
+        watchlist_update = {
+            "status": "error",
+            "message": f"Trade succeeded, but watchlist update failed: {error}",
+        }
+
+    order["watchlist_update"] = watchlist_update
+    return order
 
 
 @mcp.tool
