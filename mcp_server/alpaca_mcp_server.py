@@ -4,7 +4,8 @@ Alpaca Markets paper-trading MCP server.
 Exposes paper-trading tools over MCP (Model Context Protocol) so a
 Databricks Agent Bricks agent can call them like any other tool:
     - get_quote(symbol)
-    - place_trade(account_id, symbol, side, quantity)
+    - stage_trade(account_id, symbol, side, quantity)
+    - execute_trade(account_id, symbol, side, quantity, confirmation_code)
     - get_positions(account_id)
     - get_account_summary(account_id)
     - get_order_history(account_id, limit)
@@ -36,6 +37,9 @@ Run locally:
 
 import os
 import logging
+import secrets
+import threading
+import time
 from contextvars import ContextVar
 
 from fastmcp import FastMCP
@@ -69,6 +73,10 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/all-M
 
 # Context variable to store request headers for accessing end-user identity
 _request_context: ContextVar[dict] = ContextVar('request_context', default={})
+
+_STAGED_TRADE_TTL_SECONDS = 10 * 60
+_staged_trades: dict[str, dict] = {}
+_staged_trades_lock = threading.Lock()
 
 
 def _get_end_user_email() -> str:
@@ -116,10 +124,11 @@ def get_quote(symbol: str) -> dict:
 
 
 @mcp.tool
-def place_trade(account_id: str, symbol: str, side: str, quantity: float) -> dict:
+def stage_trade(account_id: str, symbol: str, side: str, quantity: float) -> dict:
     """
-    Place a real market order (paper trade) - BUY or SELL - against the
-    configured Alpaca paper trading account.
+    Stage a paper trade without placing an order. Looks up the current quote,
+    estimates the trade cost, summarizes the trade, and returns a five-digit
+    confirmation code for execute_trade.
 
     Args:
         account_id: Accepted for signature compatibility; not used to
@@ -130,9 +139,112 @@ def place_trade(account_id: str, symbol: str, side: str, quantity: float) -> dic
         quantity: Number of shares to trade (must be positive).
 
     Returns:
-        A dict describing the order (id, symbol, side, quantity,
-        price, notional, status, created_at).
+        A dict with the staged trade details, estimated cost, summary, and
+        confirmation_code. The code expires after 10 minutes and is single-use.
     """
+    symbol = symbol.strip().upper()
+    side = side.strip().upper()
+    quantity = float(quantity)
+
+    if side not in ("BUY", "SELL"):
+        raise ValueError(f"side must be 'BUY' or 'SELL', got {side!r}")
+    if quantity <= 0:
+        raise ValueError(f"quantity must be positive, got {quantity!r}")
+
+    quote = massive_broker.get_quote(symbol)
+    estimated_cost = round(quote["price"] * quantity, 2)
+    staged_trade = {
+        "account_id": account_id,
+        "symbol": symbol,
+        "side": side,
+        "quantity": quantity,
+        "price": quote["price"],
+        "estimated_cost": estimated_cost,
+        "created_at": time.time(),
+    }
+
+    with _staged_trades_lock:
+        now = time.time()
+        expired_codes = [
+            code for code, trade in _staged_trades.items()
+            if now - trade["created_at"] > _STAGED_TRADE_TTL_SECONDS
+        ]
+        for code in expired_codes:
+            del _staged_trades[code]
+        confirmation_code = f"{secrets.randbelow(100000):05d}"
+        while confirmation_code in _staged_trades:
+            confirmation_code = f"{secrets.randbelow(100000):05d}"
+        _staged_trades[confirmation_code] = staged_trade
+
+    return {
+        "status": "staged",
+        "account_id": account_id,
+        "symbol": symbol,
+        "side": side,
+        "quantity": quantity,
+        "quoted_price": quote["price"],
+        "estimated_cost": estimated_cost,
+        "quote_as_of": quote.get("as_of"),
+        "summary": f"{side} {quantity:g} {symbol} at approximately ${quote['price']:.2f} per share, estimated cost ${estimated_cost:.2f}.",
+        "confirmation_code": confirmation_code,
+        "expires_in_seconds": _STAGED_TRADE_TTL_SECONDS,
+    }
+
+
+@mcp.tool
+def execute_trade(
+    account_id: str,
+    symbol: str,
+    side: str,
+    quantity: float,
+    confirmation_code: str,
+) -> dict:
+    """Execute a previously staged paper trade after code confirmation.
+
+    The confirmation code must be the five-digit code returned by stage_trade
+    for the same account, symbol, side, and quantity.
+    """
+    symbol = symbol.strip().upper()
+    side = side.strip().upper()
+    quantity = float(quantity)
+    confirmation_code = confirmation_code.strip()
+
+    if not (len(confirmation_code) == 5 and confirmation_code.isdigit()):
+        return {
+            "status": "confirmation_required",
+            "message": "Supply the five-digit confirmation_code returned by stage_trade.",
+        }
+
+    with _staged_trades_lock:
+        staged_trade = _staged_trades.get(confirmation_code)
+        if staged_trade is None:
+            return {
+                "status": "invalid_confirmation",
+                "message": "The confirmation code is invalid, expired, or already used.",
+            }
+        if time.time() - staged_trade["created_at"] > _STAGED_TRADE_TTL_SECONDS:
+            del _staged_trades[confirmation_code]
+            return {
+                "status": "invalid_confirmation",
+                "message": "The confirmation code has expired. Stage the trade again.",
+            }
+        if any(
+            staged_trade[key] != value
+            for key, value in {
+                "account_id": account_id,
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+            }.items()
+        ):
+            return {
+                "status": "trade_mismatch",
+                "message": "The confirmation code does not match the staged trade details.",
+            }
+
+        # Consume before the external call so retries cannot submit twice.
+        del _staged_trades[confirmation_code]
+
     return alpaca_broker.place_order(account_id, symbol, side, quantity)
 
 

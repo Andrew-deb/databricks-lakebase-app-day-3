@@ -3,7 +3,7 @@
 Builds on [Day 2](../databricks-lakebase-app-day-2/README.md)'s Lakebase pattern. Day 3 adds:
 
 - An **Alpaca Markets paper-trading MCP server** (`mcp_server/`) - exposes paper-trading tools
-  (`get_quote`, `place_trade`, `get_positions`, `get_account_summary`, `get_order_history`)
+  (`get_quote`, `stage_trade`, `execute_trade`, `get_positions`, `get_account_summary`, `get_order_history`)
   over the Model Context Protocol, backed by a real Alpaca paper-trading account.
 - A **Databricks Agent Bricks agent** that connects to that MCP server as an external tool,
   reads market data from your Lakebase Day 2 watchlist/news tables, and decides to place
@@ -20,8 +20,8 @@ Builds on [Day 2](../databricks-lakebase-app-day-2/README.md)'s Lakebase pattern
 
 ```
 Agent Bricks agent  --(MCP tool calls)-->  mcp_server/alpaca_mcp_server.py  --(REST)-->  Alpaca Markets (paper)
-        ^                                                                                     
-        | (reads context: watchlist, ticker_news_* from Day 2 Lakebase)                        
+        ^
+        | (reads context: watchlist, ticker_news_* from Day 2 Lakebase)
         +-----------------------------------------------------------------------------------+
                                                                                               |
                                         dashboard/app.py  <--(reads same Alpaca account)------+
@@ -158,8 +158,8 @@ Follow [Connect agents to external MCPs and tools](https://docs.databricks.com/a
 1. In your workspace, go to **AI Gateway** > **MCPs** > **Add MCP** (or **Register external MCP**).
 2. Paste the `alpaca-paper-mcp` app's URL from step 5 as the server endpoint (streamable HTTP).
 3. Give it a name (e.g. `alpaca-paper-trading`) and save. Databricks will introspect the
-   server and list the 5 tools (`get_quote`, `place_trade`, `get_positions`,
-   `get_account_summary`, `get_order_history`).
+   server and list the trading tools (`get_quote`, `stage_trade`, `execute_trade`,
+   `get_positions`, `get_account_summary`, `get_order_history`).
 4. Grant your Agent Bricks agent (created next) access to this MCP server via Unity Catalog
    permissions, if prompted.
 
@@ -170,7 +170,7 @@ Follow [Connect agents to external MCPs and tools](https://docs.databricks.com/a
    research agent) agent type - either works for a single tool-calling agent like this.
 3. Under **Tools**, add:
    - The `alpaca-paper-trading` MCP server you registered in step 6 (all 5 tools, or a
-     curated subset - e.g. leave out `place_trade` for a "research-only" version of the agent
+     curated subset - e.g. leave out `stage_trade` and `execute_trade` for a "research-only" version of the agent
      first, then add it back once you trust the guardrails).
    - Optionally, a **Unity Catalog function tool** or **Genie space** wired to your Day 2
      `watchlist` / `ticker_news_documents` / `ticker_news_embeddings` tables, so the agent has
@@ -179,15 +179,16 @@ Follow [Connect agents to external MCPs and tools](https://docs.databricks.com/a
 
    > You are a paper-trading research assistant. Use `get_account_summary` to check current
    > cash/positions before proposing a trade. Use the watchlist/news tools to justify any BUY or
-   > SELL. Always call `get_quote` immediately before `place_trade` to confirm price. Only trade
+   > SELL. Call `stage_trade` to get a live quote, estimated cost, and confirmation code. Only
+   > call `execute_trade` after the user explicitly supplies that five-digit code. Only trade
    > symbols already on the watchlist. Never exceed 10% of account equity in a single order.
-   > Explain your reasoning before calling `place_trade`.
+   > Explain your reasoning before calling `stage_trade`.
 
 5. **Evaluate and iterate**: Agent Bricks auto-evaluates the agent against sample prompts (e.g.
    "Check AAPL and buy 10 shares if sentiment is positive") - use this to tune the system prompt
    and tool selection before enabling it for live chat.
-6. Deploy the agent and chat with it, e.g.: *"Look at my watchlist, check recent news sentiment,
-   and place a small paper trade if you find a good opportunity."* Watch the trade land on the
+6. Deploy the agent and chat with it, e.g.: _"Look at my watchlist, check recent news sentiment,
+   and place a small paper trade if you find a good opportunity."_ Watch the trade land on the
    dashboard from step 5, and in your Alpaca paper-trading dashboard too.
 
 ## Notes
@@ -198,7 +199,7 @@ Follow [Connect agents to external MCPs and tools](https://docs.databricks.com/a
   Databricks Apps. If you prefer a single shared package, publish `alpaca_broker.py` to a
   private PyPI index or wheel and add it to both `requirements.txt` files instead of
   duplicating.
-- `place_trade` submits real orders against your real Alpaca **paper** account - fills use real
+- `execute_trade` submits real orders against your real Alpaca **paper** account - fills use real
   market prices, but no real money moves. Never point `alpaca_broker.py` at live-trading keys
   for this lab.
 - The legacy `paper_broker.py` + `lakebase.py` Lakebase-simulated engine is still present in
