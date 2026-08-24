@@ -217,7 +217,10 @@ def _write_trace(trace: dict) -> None:
                 request_id, session_id, started_at, finished_at, duration_ms,
                 method, path, status_code, user_email, mcp_session_id,
                 tool_name, session_result, error_message
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s::jsonb, %s
+            )
             """,
             (
                 trace["request_id"],
@@ -236,7 +239,7 @@ def _write_trace(trace: dict) -> None:
             ),
         )
     except Exception:
-        logger.exception("Failed to persist MCP trace")
+        logger.exception("Failed to persist MCP trace in table %s", TRACE_TABLE_NAME)
 
 
 mcp.add_middleware(TraceMiddleware())
