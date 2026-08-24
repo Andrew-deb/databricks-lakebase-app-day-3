@@ -38,6 +38,9 @@ Agent Bricks agent  --(MCP tool calls)-->  mcp_server/alpaca_mcp_server.py  --(R
 - `mcp_server/alpaca_mcp_server.py` wraps `alpaca_broker.py` with [FastMCP](https://gofastmcp.com/)
   `@mcp.tool` decorators and serves them over streamable HTTP - the transport Databricks'
   MCP client/gateway expects when you [host your own MCP server as a Databricks App](https://docs.databricks.com/aws/en/agents/mcp-tools/custom-mcp).
+- `mcp_server/schema_tracing.sql` creates the `agent_mcp_traces` Lakebase table. The MCP
+  middleware records request IDs, MCP session IDs, user identity, timing, status, and errors
+  for each Agent Bricks call without storing tool arguments or results.
 - Alpaca's paper trading is **one account per API key pair**, not multi-tenant - `account_id` is
   accepted by every tool for signature compatibility but doesn't select between accounts; every
   call operates against the single Alpaca paper account configured via secrets (see below).
@@ -112,6 +115,9 @@ to create one.
 
 - Lakebase URL: from a Databricks notebook (`%sh python setup_secrets.py`), same as Day 2.
 - Alpaca API keys: see "Setting up Alpaca Markets" above.
+
+Run `mcp_server/schema_tracing.sql` against Lakebase before deploying the MCP app so request
+traces can be persisted. Set `TRACE_TABLE_NAME` when using a different table name.
 
 ### 3. Configure environment variables (local dev)
 

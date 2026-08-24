@@ -40,6 +40,9 @@ import logging
 import secrets
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
+import asyncio
 from contextvars import ContextVar
 
 from fastmcp import FastMCP
@@ -70,6 +73,7 @@ NEWS_TABLE_NAME = os.environ.get("NEWS_TABLE_NAME", "ticker_news_documents")
 EMBEDDINGS_TABLE_NAME = os.environ.get("EMBEDDINGS_TABLE_NAME", "ticker_news_embeddings")
 CHUNK_EMBEDDINGS_TABLE_NAME = os.environ.get("CHUNK_EMBEDDINGS_TABLE_NAME", "ticker_news_chunk_embeddings")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+TRACE_TABLE_NAME = os.environ.get("TRACE_TABLE_NAME", "agent_mcp_traces")
 
 # Context variable to store request headers for accessing end-user identity
 _request_context: ContextVar[dict] = ContextVar('request_context', default={})
@@ -97,16 +101,86 @@ mcp = FastMCP("alpaca-paper-trading")
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
-    """Middleware to capture HTTP headers containing end-user identity."""
+    """Capture end-user identity and persist one trace row per MCP request."""
     async def dispatch(self, request: Request, call_next):
-        # Capture headers that Databricks injects with user identity
+        started_at = datetime.now(timezone.utc)
+        started = time.perf_counter()
+        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        # Streamable HTTP clients send mcp-session-id after initialization.
+        # The custom header allows clients without MCP session support to carry
+        # the generated ID on subsequent requests.
+        session_id = (
+            request.headers.get("mcp-session-id")
+            or request.headers.get("x-agent-session-id")
+            or str(uuid.uuid4())
+        )
         headers = {
             'x-forwarded-user': request.headers.get('x-forwarded-user'),
             'x-forwarded-email': request.headers.get('x-forwarded-email'),
+            'x-agent-session-id': session_id,
         }
         _request_context.set(headers)
-        response = await call_next(request)
+        response = None
+        error_message = None
+        try:
+            response = await call_next(request)
+        except Exception as error:
+            error_message = str(error)
+            raise
+        finally:
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            status_code = response.status_code if response is not None else 500
+            response_headers = response.headers if response is not None else None
+            if response_headers is not None:
+                session_id = response_headers.get("mcp-session-id", session_id)
+                response_headers.setdefault("x-agent-session-id", session_id)
+                response_headers.setdefault("x-trace-id", request_id)
+            await asyncio.to_thread(
+                _write_trace,
+                {
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "started_at": started_at,
+                    "finished_at": datetime.now(timezone.utc),
+                    "duration_ms": duration_ms,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": status_code,
+                    "user_email": headers["x-forwarded-user"] or headers["x-forwarded-email"],
+                    "mcp_session_id": request.headers.get("mcp-session-id"),
+                    "error_message": error_message,
+                },
+            )
         return response
+
+
+def _write_trace(trace: dict) -> None:
+    """Persist tracing telemetry without allowing Lakebase failures to affect MCP."""
+    try:
+        lakebase.run_write(
+            f"""
+            INSERT INTO {TRACE_TABLE_NAME} (
+                request_id, session_id, started_at, finished_at, duration_ms,
+                method, path, status_code, user_email, mcp_session_id,
+                error_message
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                trace["request_id"],
+                trace["session_id"],
+                trace["started_at"],
+                trace["finished_at"],
+                trace["duration_ms"],
+                trace["method"],
+                trace["path"],
+                trace["status_code"],
+                trace["user_email"],
+                trace["mcp_session_id"],
+                trace["error_message"],
+            ),
+        )
+    except Exception:
+        logger.exception("Failed to persist MCP trace")
 
 
 @mcp.tool
